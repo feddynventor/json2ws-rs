@@ -1,7 +1,7 @@
 use clap::Parser;
+use env_logger;
 use futures_util::{SinkExt, StreamExt};
 use log::{error, info, warn};
-use env_logger;
 use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{mpsc, RwLock};
@@ -37,20 +37,31 @@ async fn main() {
         });
 
     // JSON broadcast route (HTTP POST endpoint)
-    let broadcast_route = warp::path("broadcast")
+    let broadcast_post_route = warp::path("broadcast")
         .and(warp::post())
         .and(warp::body::json())
-        .and(warp::any().map(move || clients.clone()))
+        .and(with_clients(clients.clone()))
         .and_then(handle_broadcast);
+
+    // Query param broadcast route (HTTP GET endpoint)
+    let broadcast_get_route = warp::path("broadcast")
+        .and(warp::get())
+        .and(warp::query::<HashMap<String, String>>())
+        .and(with_clients(clients.clone()))
+        .and_then(|params: HashMap<String, String>, clients: Clients| {
+            // Convert query parameters to JSON Value
+            let payload = json!(params);
+            handle_broadcast(payload, clients)
+        });
 
     // Health check route
     let health_route = warp::path("health").map(|| "OK");
 
-    let ws_server = 
-        warp::serve(ws_route).run(([0, 0, 0, 0], args.ws_port));
+    let ws_server = warp::serve(ws_route)
+        .run(([0, 0, 0, 0], args.ws_port));
 
-    let http_server =
-        warp::serve(broadcast_route.or(health_route)).run(([0, 0, 0, 0], args.http_port));
+    let http_server = warp::serve(broadcast_post_route.or(health_route).or(broadcast_get_route))
+        .run(([0, 0, 0, 0], args.http_port));
 
     info!("WebSocket server started on port {}", args.ws_port);
     info!(
@@ -60,6 +71,11 @@ async fn main() {
 
     // Run both servers concurrently
     tokio::join!(ws_server, http_server);
+}
+
+// Helper function to share clients with routes
+fn with_clients(clients: Clients) -> impl Filter<Extract = (Clients,), Error = std::convert::Infallible> + Clone {
+    warp::any().map(move || clients.clone())
 }
 
 async fn handle_websocket_connection(ws: WebSocket, clients: Clients) {
